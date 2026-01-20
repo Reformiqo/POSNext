@@ -439,28 +439,57 @@ def get_batch_serial_details(item_code, warehouse):
 			# Get available batches with warehouse-specific quantities
 			# Filter out expired batches (expiry_date < today or no expiry_date is allowed)
 			today = frappe.utils.nowdate()
-			batches = frappe.db.sql(
-				"""
-				SELECT
-					b.name as batch_no,
-					SUM(sle.actual_qty) as qty,
-					b.expiry_date
-				FROM `tabBatch` b
-				INNER JOIN `tabStock Ledger Entry` sle
-					ON sle.batch_no = b.name
-					AND sle.item_code = b.item
-					AND sle.warehouse = %s
-					AND sle.is_cancelled = 0
-				WHERE b.item = %s
-					AND b.disabled = 0
-					AND (b.expiry_date IS NULL OR b.expiry_date >= %s)
-				GROUP BY b.name
-				HAVING SUM(sle.actual_qty) > 0
-				ORDER BY b.expiry_date ASC, b.creation ASC
-				""",
-				(warehouse, item_code, today),
-				as_dict=1,
-			)
+
+			# Get list of warehouses to check (include child warehouses if group)
+			warehouses = [warehouse] if warehouse else []
+			if warehouse and frappe.db.get_value("Warehouse", warehouse, "is_group"):
+				child_warehouses = frappe.db.get_descendants("Warehouse", warehouse)
+				if child_warehouses:
+					warehouses = child_warehouses
+
+			batches = []
+			if warehouses:
+				batches = frappe.db.sql(
+					"""
+					SELECT
+						b.name as batch_no,
+						SUM(sle.actual_qty) as qty,
+						b.expiry_date
+					FROM `tabBatch` b
+					INNER JOIN `tabStock Ledger Entry` sle
+						ON sle.batch_no = b.name
+						AND sle.item_code = b.item
+						AND sle.is_cancelled = 0
+					WHERE b.item = %s
+						AND b.disabled = 0
+						AND sle.warehouse IN %s
+						AND (b.expiry_date IS NULL OR b.expiry_date >= %s)
+					GROUP BY b.name
+					HAVING SUM(sle.actual_qty) > 0
+					ORDER BY b.expiry_date ASC, b.creation ASC
+					""",
+					(item_code, warehouses, today),
+					as_dict=1,
+				)
+
+			# Fallback: If no SLE-based batches found, use batch_qty from Batch table
+			if not batches:
+				batches = frappe.db.sql(
+					"""
+					SELECT
+						name as batch_no,
+						batch_qty as qty,
+						expiry_date
+					FROM `tabBatch`
+					WHERE item = %s
+						AND disabled = 0
+						AND batch_qty > 0
+						AND (expiry_date IS NULL OR expiry_date >= %s)
+					ORDER BY expiry_date ASC, creation ASC
+					""",
+					(item_code, today),
+					as_dict=1,
+				)
 			result["batches"] = batches
 
 		if has_serial_no:
