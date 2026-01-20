@@ -432,15 +432,29 @@ def get_batch_serial_details(item_code, warehouse):
 		}
 
 		if has_batch_no:
-			# Get available batches (note: qty should come from get_batch_qty)
+			# Get available batches with warehouse-specific quantities
+			# Filter out expired batches (expiry_date < today or no expiry_date is allowed)
+			today = frappe.utils.nowdate()
 			batches = frappe.db.sql(
 				"""
-				SELECT batch_no, batch_qty as qty, expiry_date
-				FROM `tabBatch`
-				WHERE item = %s AND batch_qty > 0
-				ORDER BY expiry_date ASC, creation ASC
+				SELECT
+					b.name as batch_no,
+					SUM(sle.actual_qty) as qty,
+					b.expiry_date
+				FROM `tabBatch` b
+				INNER JOIN `tabStock Ledger Entry` sle
+					ON sle.batch_no = b.name
+					AND sle.item_code = b.item
+					AND sle.warehouse = %s
+					AND sle.is_cancelled = 0
+				WHERE b.item = %s
+					AND b.disabled = 0
+					AND (b.expiry_date IS NULL OR b.expiry_date >= %s)
+				GROUP BY b.name
+				HAVING SUM(sle.actual_qty) > 0
+				ORDER BY b.expiry_date ASC, b.creation ASC
 				""",
-				item_code,
+				(warehouse, item_code, today),
 				as_dict=1,
 			)
 			result["batches"] = batches
@@ -477,7 +491,7 @@ def get_item_variants(template_item, pos_profile):
 
 		# Add company filter to show items for specific company + global items
 		if pos_profile_doc.company:
-			variant_filters["ifnull(custom_company, '')"] = ["in", [pos_profile_doc.company, ""]]
+			variant_filters["custom_company"] = ["in", [pos_profile_doc.company, "", None]]
 
 		variants = frappe.get_all(
 			"Item",
@@ -953,7 +967,7 @@ def get_items(pos_profile, search_term=None, item_group=None, start=0, limit=20)
 		filters = {
 			"disabled": 0,
 			"is_sales_item": 1,  # Only show items with "Allow Sales" enabled
-			"ifnull(variant_of, '')": "",  # Exclude items that are variants of a template
+			"variant_of": ["in", ["", None]],  # Exclude items that are variants of a template
 		}
 
 		# IMPORTANT: Filtering logic explained:
@@ -964,7 +978,7 @@ def get_items(pos_profile, search_term=None, item_group=None, start=0, limit=20)
 		# Add company filter - show items for specific company + global items (empty company)
 		# Global items (custom_company is empty) are available to all companies
 		if pos_profile_doc.company:
-			filters["ifnull(custom_company, '')"] = ["in", [pos_profile_doc.company, ""]]
+			filters["custom_company"] = ["in", [pos_profile_doc.company, "", None]]
 
 		# Add item group filter if provided
 		if item_group:
