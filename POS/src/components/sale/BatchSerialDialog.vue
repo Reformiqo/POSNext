@@ -228,29 +228,20 @@ const selectedBatch = ref(null)
 const selectedSerials = ref([])
 const serialSearchQuery = ref("")
 
-// Resource for loading batches
+// Resource for loading batches with warehouse-specific quantities
 const batchesResource = createResource({
-	url: "frappe.client.get_list",
+	url: "pos_next.api.items.get_batch_serial_details",
 	makeParams() {
 		return {
-			doctype: "Batch",
-			filters: {
-				item: props.item?.item_code,
-				disabled: 0,
-			},
-			fields: ["name as batch_no", "expiry_date"],
-			limit_page_length: 100,
+			item_code: props.item?.item_code,
+			warehouse: props.warehouse,
 		}
 	},
 	auto: false,
 	async onSuccess(data) {
-		if (data && Array.isArray(data)) {
-			// For simplicity, set qty to 999 for all batches
-			// In production, you'd want to query actual stock
-			availableBatches.value = data.map((batch) => ({
-				...batch,
-				qty: 999,
-			}))
+		if (data && data.batches && Array.isArray(data.batches)) {
+			// Batches come with correct warehouse-specific qty and filtered for expiry
+			availableBatches.value = data.batches
 		}
 	},
 	onError(error) {
