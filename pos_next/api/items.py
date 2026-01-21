@@ -449,47 +449,35 @@ def get_batch_serial_details(item_code, warehouse):
 
 			batches = []
 			if warehouses:
-				batches = frappe.db.sql(
-					"""
-					SELECT
-						b.name as batch_no,
-						SUM(sle.actual_qty) as qty,
-						b.expiry_date
-					FROM `tabBatch` b
-					INNER JOIN `tabStock Ledger Entry` sle
-						ON sle.batch_no = b.name
-						AND sle.item_code = b.item
-						AND sle.is_cancelled = 0
-					WHERE b.item = %s
-						AND b.disabled = 0
-						AND sle.warehouse IN %s
-						AND (b.expiry_date IS NULL OR b.expiry_date >= %s)
-					GROUP BY b.name
-					HAVING SUM(sle.actual_qty) > 0
-					ORDER BY b.expiry_date ASC, b.creation ASC
-					""",
-					(item_code, warehouses, today),
-					as_dict=1,
-				)
+				# Use ERPNext's get_batch_qty function which properly calculates batch stock
+				from erpnext.stock.doctype.batch.batch import get_batch_qty
 
-			# Fallback: If no SLE-based batches found, use batch_qty from Batch table
-			if not batches:
-				batches = frappe.db.sql(
-					"""
-					SELECT
-						name as batch_no,
-						batch_qty as qty,
-						expiry_date
-					FROM `tabBatch`
-					WHERE item = %s
-						AND disabled = 0
-						AND batch_qty > 0
-						AND (expiry_date IS NULL OR expiry_date >= %s)
-					ORDER BY expiry_date ASC, creation ASC
-					""",
-					(item_code, today),
-					as_dict=1,
-				)
+				for wh in warehouses:
+					batch_list = get_batch_qty(warehouse=wh, item_code=item_code) or []
+					for batch in batch_list:
+						if batch.get("qty", 0) > 0 and batch.get("batch_no"):
+							# Get batch details for expiry filtering
+							batch_doc = frappe.db.get_value(
+								"Batch",
+								batch.batch_no,
+								["expiry_date", "disabled"],
+								as_dict=True
+							)
+							if batch_doc and not batch_doc.disabled:
+								# Filter expired batches
+								is_valid = (
+									not batch_doc.expiry_date
+									or str(batch_doc.expiry_date) >= str(today)
+								)
+								if is_valid:
+									batches.append({
+										"batch_no": batch.batch_no,
+										"qty": batch.qty,
+										"expiry_date": batch_doc.expiry_date,
+									})
+
+				# Sort by expiry date (FEFO - First Expired First Out)
+				batches.sort(key=lambda x: (x["expiry_date"] or "9999-99-99", x["batch_no"]))
 			result["batches"] = batches
 
 		if has_serial_no:
