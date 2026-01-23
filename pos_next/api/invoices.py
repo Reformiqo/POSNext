@@ -458,6 +458,24 @@ def update_invoice(data):
         # Populate missing fields (company, currency, accounts, etc.)
         invoice_doc.set_missing_values()
 
+        # Apply tax inclusive setting BEFORE calculation
+        # This ensures taxes are calculated with the correct included_in_print_rate
+        # from POS Settings, not from the tax template
+        if pos_profile:
+            try:
+                pos_settings = frappe.db.get_value(
+                    "POS Settings",
+                    {"pos_profile": pos_profile},
+                    ["tax_inclusive"],
+                    as_dict=True
+                )
+                tax_inclusive = pos_settings.get("tax_inclusive", 0) if pos_settings else 0
+                for tax in invoice_doc.get("taxes", []):
+                    if tax.charge_type != "Actual":
+                        tax.included_in_print_rate = 1 if tax_inclusive else 0
+            except Exception:
+                pass  # Continue with template defaults if error
+
         # Calculate totals and apply discounts (with rounding disabled)
         invoice_doc.calculate_taxes_and_totals()
 

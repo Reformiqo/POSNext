@@ -1129,18 +1129,51 @@ def get_items(pos_profile, search_term=None, item_group=None, start=0, limit=20)
 		# Batch query stock for all items at once (performance optimization)
 		stock_map = {}
 		if item_codes and pos_profile_doc.warehouse:
-			stock_items = [item["item_code"] for item in items if item.get("is_stock_item")]
-			if stock_items:
+			# Separate batch items from non-batch items
+			batch_items = [item["item_code"] for item in items if item.get("is_stock_item") and item.get("has_batch_no")]
+			non_batch_items = [item["item_code"] for item in items if item.get("is_stock_item") and not item.get("has_batch_no")]
+
+			# For non-batch items: Use Bin table (standard stock tracking)
+			if non_batch_items:
 				stocks = frappe.db.sql(
 					"""
 					SELECT item_code, actual_qty
 					FROM `tabBin`
 					WHERE item_code IN %s AND warehouse = %s
 					""",
-					[stock_items, pos_profile_doc.warehouse],
+					[non_batch_items, pos_profile_doc.warehouse],
 					as_dict=1,
 				)
 				stock_map = {s["item_code"]: s["actual_qty"] for s in stocks}
+
+			# For batch items: Calculate stock from valid batches only
+			# (non-expired, enabled batches with qty > 0)
+			if batch_items:
+				today = frappe.utils.nowdate()
+				batch_stocks = frappe.db.sql(
+					"""
+					SELECT
+						b.item as item_code,
+						SUM(sle.actual_qty) as actual_qty
+					FROM `tabBatch` b
+					INNER JOIN `tabStock Ledger Entry` sle
+						ON sle.batch_no = b.name
+						AND sle.item_code = b.item
+						AND sle.is_cancelled = 0
+						AND sle.warehouse = %s
+					WHERE b.item IN %s
+						AND b.disabled = 0
+						AND (b.expiry_date IS NULL OR b.expiry_date >= %s)
+					GROUP BY b.item
+					HAVING SUM(sle.actual_qty) > 0
+					""",
+					(pos_profile_doc.warehouse, batch_items, today),
+					as_dict=1,
+				)
+				for bs in batch_stocks:
+					stock_map[bs["item_code"]] = bs["actual_qty"]
+
+				# Items with no valid batches will have 0 stock (not in stock_map)
 
 		# ===================================================================
 		# PRODUCT BUNDLE AVAILABILITY: Calculate bundle stock (bulk optimized)
