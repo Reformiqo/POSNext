@@ -1203,10 +1203,11 @@ def search_invoices_for_return(
 
 def _apply_selected_offers_directly(selected_offer_names, prepared_items, pricing_items, index_map, profile):
     """
-    Apply explicitly selected offers directly to items without ERPNext validation.
+    Apply explicitly selected offers directly to items.
 
-    When users select offers from the UI, we trust their selection and apply
-    the discounts directly, checking only item applicability (item_code, item_group, brand).
+    When users select offers from the UI, apply them checking:
+    - Item applicability (item_code, item_group, brand)
+    - min_amt/max_amt validation (cumulative total of qualifying items if is_cumulative is set)
     """
     applied_rules = set()
     free_items = []
@@ -1224,47 +1225,95 @@ def _apply_selected_offers_directly(selected_offer_names, prepared_items, pricin
     if not selected_rules:
         return {"items": [dict(item) for item in prepared_items]}
 
-    # For each item, check which rules apply and calculate discounts
-    for item_idx, pricing_item in zip(index_map, pricing_items):
-        item_doc = prepared_items[item_idx]
-        item_code = pricing_item.get("item_code")
-        item_group = pricing_item.get("item_group")
-        brand = pricing_item.get("brand")
-        qty = flt(pricing_item.get("qty") or 0)
-        price_list_rate = flt(pricing_item.get("price_list_rate") or pricing_item.get("rate") or 0)
+    # For each rule, find qualifying items and validate conditions
+    for rule in selected_rules:
+        # Find all items that match this rule's criteria
+        qualifying_items = []
+        qualifying_total = 0
+        qualifying_qty = 0
 
-        if qty <= 0:
-            continue
+        for item_idx, pricing_item in zip(index_map, pricing_items):
+            item_code = pricing_item.get("item_code")
+            item_group = pricing_item.get("item_group")
+            brand = pricing_item.get("brand")
+            qty = flt(pricing_item.get("qty") or 0)
+            price_list_rate = flt(pricing_item.get("price_list_rate") or pricing_item.get("rate") or 0)
 
-        applicable_rules = []
-
-        for rule in selected_rules:
-            # Check if this rule applies to this item
-            if not _rule_applies_to_item(rule, item_code, item_group, brand):
+            if qty <= 0:
                 continue
-            applicable_rules.append(rule)
 
-        if not applicable_rules:
+            if _rule_applies_to_item(rule, item_code, item_group, brand):
+                item_amount = qty * price_list_rate
+                qualifying_items.append({
+                    "item_idx": item_idx,
+                    "pricing_item": pricing_item,
+                    "qty": qty,
+                    "price_list_rate": price_list_rate,
+                    "amount": item_amount,
+                })
+                qualifying_total += item_amount
+                qualifying_qty += qty
+
+        if not qualifying_items:
             continue
 
-        # Calculate discounts from applicable rules
-        discount_percentage = 0
-        per_unit_discount = 0
-        applied_rule_names = []
-        applied_schemes = set()
+        # Check min_amt/max_amt conditions
+        # is_cumulative means check total of all qualifying items
+        is_cumulative = rule.get("is_cumulative") or False
 
-        for rule in applicable_rules:
-            applied_rule_names.append(rule.name)
-            if rule.promotional_scheme:
-                applied_schemes.add(rule.promotional_scheme)
+        if is_cumulative:
+            # Check against cumulative total of qualifying items
+            if rule.min_amt and flt(rule.min_amt) > 0:
+                if qualifying_total < flt(rule.min_amt):
+                    continue  # Skip this rule - doesn't meet min amount
+
+            if rule.max_amt and flt(rule.max_amt) > 0:
+                if qualifying_total > flt(rule.max_amt):
+                    continue  # Skip this rule - exceeds max amount
+
+            if rule.min_qty and flt(rule.min_qty) > 0:
+                if qualifying_qty < flt(rule.min_qty):
+                    continue
+
+            if rule.max_qty and flt(rule.max_qty) > 0:
+                if qualifying_qty > flt(rule.max_qty):
+                    continue
+
+        # Apply discount to qualifying items
+        for qi in qualifying_items:
+            item_idx = qi["item_idx"]
+            item_doc = prepared_items[item_idx]
+            qty = qi["qty"]
+            price_list_rate = qi["price_list_rate"]
+
+            # For non-cumulative rules, check per-item conditions
+            if not is_cumulative:
+                item_amount = qi["amount"]
+                if rule.min_amt and flt(rule.min_amt) > 0:
+                    if item_amount < flt(rule.min_amt):
+                        continue
+                if rule.max_amt and flt(rule.max_amt) > 0:
+                    if item_amount > flt(rule.max_amt):
+                        continue
+                if rule.min_qty and flt(rule.min_qty) > 0:
+                    if qty < flt(rule.min_qty):
+                        continue
+                if rule.max_qty and flt(rule.max_qty) > 0:
+                    if qty > flt(rule.max_qty):
+                        continue
+
+            # Calculate discount
+            discount_percentage = 0
+            per_unit_discount = 0
+            new_rate = price_list_rate
 
             if rule.price_or_product_discount == "Price":
                 if rule.rate_or_discount == "Discount Percentage" and rule.discount_percentage:
-                    discount_percentage += flt(rule.discount_percentage)
+                    discount_percentage = flt(rule.discount_percentage)
                 elif rule.rate_or_discount == "Discount Amount" and rule.discount_amount:
-                    per_unit_discount += flt(rule.discount_amount)
+                    per_unit_discount = flt(rule.discount_amount)
                 elif rule.rate_or_discount == "Rate" and rule.rate:
-                    price_list_rate = flt(rule.rate)
+                    new_rate = flt(rule.rate)
             elif rule.price_or_product_discount == "Product":
                 # Handle free item rules
                 if rule.free_item and rule.free_qty:
@@ -1279,28 +1328,43 @@ def _apply_selected_offers_directly(selected_offer_names, prepared_items, pricin
                     })
                     free_items.append(free_item_doc)
 
-        # Calculate line discount amount
-        line_discount_amount = 0
-        if discount_percentage and qty and price_list_rate:
-            line_discount_amount = price_list_rate * qty * discount_percentage / 100
-        elif per_unit_discount and qty:
-            line_discount_amount = per_unit_discount * qty
+            # Calculate line discount amount
+            line_discount_amount = 0
+            if discount_percentage and qty and price_list_rate:
+                line_discount_amount = price_list_rate * qty * discount_percentage / 100
+            elif per_unit_discount and qty:
+                line_discount_amount = per_unit_discount * qty
 
-        # If we have a discount amount but no percentage, calculate the percentage
-        if not discount_percentage and line_discount_amount and qty and price_list_rate:
-            base_amount = price_list_rate * qty
-            if base_amount:
-                discount_percentage = (line_discount_amount / base_amount) * 100
+            # If we have a discount amount but no percentage, calculate the percentage
+            if not discount_percentage and line_discount_amount and qty and price_list_rate:
+                base_amount = price_list_rate * qty
+                if base_amount:
+                    discount_percentage = (line_discount_amount / base_amount) * 100
 
-        # Update item with discounts
-        item_doc.discount_percentage = discount_percentage
-        item_doc.discount_amount = line_discount_amount
-        item_doc.price_list_rate = price_list_rate
-        item_doc.rate = flt(item_doc.get("rate") or price_list_rate)
-        item_doc.pricing_rules = applied_rule_names
-        item_doc.applied_promotional_schemes = list(applied_schemes)
+            # Update item with discounts (accumulate if multiple rules apply)
+            existing_discount_pct = flt(item_doc.get("discount_percentage") or 0)
+            existing_discount_amt = flt(item_doc.get("discount_amount") or 0)
 
-        applied_rules.update(applied_rule_names)
+            item_doc.discount_percentage = existing_discount_pct + discount_percentage
+            item_doc.discount_amount = existing_discount_amt + line_discount_amount
+            item_doc.price_list_rate = new_rate
+            item_doc.rate = flt(item_doc.get("rate") or new_rate)
+
+            # Track applied rules
+            existing_rules = item_doc.get("pricing_rules") or []
+            if not isinstance(existing_rules, list):
+                existing_rules = []
+            existing_rules.append(rule.name)
+            item_doc.pricing_rules = existing_rules
+
+            existing_schemes = item_doc.get("applied_promotional_schemes") or []
+            if not isinstance(existing_schemes, list):
+                existing_schemes = []
+            if rule.promotional_scheme and rule.promotional_scheme not in existing_schemes:
+                existing_schemes.append(rule.promotional_scheme)
+            item_doc.applied_promotional_schemes = existing_schemes
+
+            applied_rules.add(rule.name)
 
     return {
         "items": [dict(item) for item in prepared_items],
@@ -1462,67 +1526,8 @@ def apply_offers(invoice_data, selected_offers=None):
         if not pricing_items:
             return {"items": items}
 
-        company_currency = frappe.get_cached_value(
-            "Company", profile.company, "default_currency"
-        )
-
-        # Get customer details if customer is provided
-        customer = invoice.get("customer")
-        customer_group = invoice.get("customer_group")
-        territory = invoice.get("territory")
-
-        if customer and not customer_group:
-            # Fetch customer_group from customer
-            try:
-                customer_data = frappe.get_cached_value(
-                    "Customer", customer, ["customer_group", "territory"], as_dict=1
-                )
-                if customer_data:
-                    customer_group = customer_data.get("customer_group")
-                    if not territory:
-                        territory = customer_data.get("territory")
-            except Exception:
-                pass
-
-        # If still no customer_group, use default
-        if not customer_group:
-            customer_group = "All Customer Groups"
-
-        pricing_args = frappe._dict(
-            {
-                "doctype": invoice.get("doctype") or "Sales Invoice",
-                "name": invoice.get("name") or "POS-INVOICE",
-                "company": profile.company,
-                "transaction_date": invoice.get("posting_date") or nowdate(),
-                "posting_date": invoice.get("posting_date") or nowdate(),
-                "currency": invoice.get("currency")
-                or profile.get("currency")
-                or company_currency,
-                "conversion_rate": flt(invoice.get("conversion_rate") or 1) or 1,
-                "plc_conversion_rate": flt(invoice.get("plc_conversion_rate") or 1)
-                or 1,
-                "price_list": invoice.get("price_list")
-                or profile.get("selling_price_list"),
-                "customer": customer,
-                "customer_group": customer_group,
-                "territory": territory,
-                "items": pricing_items,
-            }
-        )
-
-        # Create a mock document object for ERPNext's pricing rule engine
-        # This is needed for "Product Discount" type rules (Buy X Get Y Free)
-        # which iterate over doc.items
-        mock_doc = frappe._dict({
-            "doctype": invoice.get("doctype") or "Sales Invoice",
-            "name": invoice.get("name") or "POS-INVOICE",
-            "company": profile.company,
-            "customer": customer,
-            "items": pricing_items,
-        })
-
-        # If specific offers are selected from the UI, apply them directly
-        # without relying on ERPNext's validation
+        # Offers are only applied when explicitly selected from the UI
+        # No automatic/fallback offer application
         if selected_offer_names:
             return _apply_selected_offers_directly(
                 selected_offer_names,
@@ -1532,172 +1537,9 @@ def apply_offers(invoice_data, selected_offers=None):
                 profile,
             )
 
-        # Call ERPNext pricing engine - it handles all conflicts based on priority
-        pricing_results = erpnext_apply_pricing_rule(pricing_args, doc=mock_doc) or []
+        # No offers selected - return items unchanged
+        return {"items": items}
 
-        if not pricing_results:
-            return {"items": items}
-
-        raw_rule_names = set()
-        for result in pricing_results:
-            if not result:
-                continue
-            rules = []
-            if erpnext_get_applied_pricing_rules:
-                rules = erpnext_get_applied_pricing_rules(result.get("pricing_rules"))
-            else:
-                raw_rules = result.get("pricing_rules") or []
-                if isinstance(raw_rules, str):
-                    if raw_rules.startswith("["):
-                        rules = json.loads(raw_rules)
-                    else:
-                        rules = [r.strip() for r in raw_rules.split(",") if r.strip()]
-                elif isinstance(raw_rules, (list, tuple, set)):
-                    rules = list(raw_rules)
-            raw_rule_names.update(rules)
-
-        rule_map = {}
-        if raw_rule_names:
-            rule_records = frappe.get_all(
-                "Pricing Rule",
-                filters={"name": ["in", list(raw_rule_names)]},
-                fields=[
-                    "name",
-                    "promotional_scheme",
-                    "coupon_code_based",
-                    "promotional_scheme_id",
-                    "price_or_product_discount",
-                ],
-            )
-            for record in rule_records:
-                if record.promotional_scheme and not record.coupon_code_based:
-                    rule_map[record.name] = record
-
-        if not rule_map:
-            return {"items": items}
-
-        applied_rules = set()
-        free_items = []
-
-        for result, item_index in zip(pricing_results, index_map):
-            if not result:
-                continue
-
-            if erpnext_get_applied_pricing_rules:
-                rule_names = erpnext_get_applied_pricing_rules(
-                    result.get("pricing_rules")
-                )
-            else:
-                raw_rules = result.get("pricing_rules") or []
-                if isinstance(raw_rules, str):
-                    if raw_rules.startswith("["):
-                        rule_names = json.loads(raw_rules)
-                    else:
-                        rule_names = [
-                            r.strip() for r in raw_rules.split(",") if r.strip()
-                        ]
-                elif isinstance(raw_rules, (list, tuple, set)):
-                    rule_names = list(raw_rules)
-                else:
-                    rule_names = []
-
-            applicable_rule_names = [
-                name for name in rule_names or [] if name in rule_map
-            ]
-
-            if not applicable_rule_names:
-                continue
-
-            item_doc = prepared_items[item_index]
-            qty = flt(item_doc.get("qty") or item_doc.get("quantity") or 0)
-            price_list_rate = flt(
-                result.get("price_list_rate")
-                or item_doc.get("price_list_rate")
-                or item_doc.get("rate")
-                or 0
-            )
-
-            # Note: ERPNext's apply_pricing_rule already validates min_amt, max_amt,
-            # min_qty, max_qty conditions at the item level. If a rule is returned
-            # in pricing_results, it has passed ERPNext's validation.
-            # We trust ERPNext's decision and don't add redundant validation.
-
-            applied_rules.update(applicable_rule_names)
-
-            # Always calculate discounts from validated rules only
-            # (Don't use ERPNext's values as they might include rules that didn't pass validation)
-            discount_percentage = 0
-            per_unit_discount = 0
-
-            for rule_name in applicable_rule_names:
-                rule_doc = rule_map.get(rule_name)
-                if not rule_doc:
-                    continue
-
-                # Fetch full pricing rule to get discount values
-                full_rule = frappe.get_cached_doc("Pricing Rule", rule_name)
-
-                if (
-                    full_rule.rate_or_discount == "Discount Percentage"
-                    and full_rule.discount_percentage
-                ):
-                    discount_percentage += flt(full_rule.discount_percentage)
-                elif (
-                    full_rule.rate_or_discount == "Discount Amount"
-                    and full_rule.discount_amount
-                ):
-                    per_unit_discount += flt(full_rule.discount_amount)
-                elif full_rule.rate_or_discount == "Rate" and full_rule.rate:
-                    # Apply fixed rate
-                    price_list_rate = flt(full_rule.rate)
-
-            line_discount_amount = 0
-            if discount_percentage and qty and price_list_rate:
-                line_discount_amount = price_list_rate * qty * discount_percentage / 100
-            elif per_unit_discount and qty:
-                line_discount_amount = per_unit_discount * qty
-            else:
-                line_discount_amount = per_unit_discount
-
-            if (
-                not discount_percentage
-                and line_discount_amount
-                and qty
-                and price_list_rate
-            ):
-                base_amount = price_list_rate * qty
-                if base_amount:
-                    discount_percentage = (line_discount_amount / base_amount) * 100
-
-            item_doc.discount_percentage = discount_percentage
-            item_doc.discount_amount = line_discount_amount
-            item_doc.price_list_rate = price_list_rate
-            item_doc.rate = flt(item_doc.get("rate") or price_list_rate)
-            item_doc.pricing_rules = applicable_rule_names
-
-            item_doc.applied_promotional_schemes = list(
-                {
-                    rule_map[name].promotional_scheme
-                    for name in applicable_rule_names
-                    if rule_map[name].promotional_scheme
-                }
-            )
-
-            for free_item in result.get("free_item_data") or []:
-                rule_name = free_item.get("pricing_rules")
-                if not rule_name or rule_name not in rule_map:
-                    continue
-                free_item_doc = frappe._dict(free_item)
-                free_item_doc.applied_promotional_scheme = rule_map[
-                    rule_name
-                ].promotional_scheme
-                free_items.append(free_item_doc)
-
-        return {
-            "items": [dict(item) for item in prepared_items],
-            "free_items": [dict(item) for item in free_items],
-            "applied_pricing_rules": sorted(applied_rules),
-        }
     except Exception as e:
         frappe.log_error(frappe.get_traceback(), "Apply Offers Error")
         frappe.throw(_("Error applying offers: {0}").format(str(e)))
