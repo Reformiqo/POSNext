@@ -1201,6 +1201,160 @@ def search_invoices_for_return(
 # ==========================================
 
 
+def _apply_selected_offers_directly(selected_offer_names, prepared_items, pricing_items, index_map, profile):
+    """
+    Apply explicitly selected offers directly to items without ERPNext validation.
+
+    When users select offers from the UI, we trust their selection and apply
+    the discounts directly, checking only item applicability (item_code, item_group, brand).
+    """
+    applied_rules = set()
+    free_items = []
+
+    # Load selected pricing rules
+    selected_rules = []
+    for rule_name in selected_offer_names:
+        try:
+            rule = frappe.get_cached_doc("Pricing Rule", rule_name)
+            if rule and rule.disable != 1:
+                selected_rules.append(rule)
+        except frappe.DoesNotExistError:
+            continue
+
+    if not selected_rules:
+        return {"items": [dict(item) for item in prepared_items]}
+
+    # For each item, check which rules apply and calculate discounts
+    for item_idx, pricing_item in zip(index_map, pricing_items):
+        item_doc = prepared_items[item_idx]
+        item_code = pricing_item.get("item_code")
+        item_group = pricing_item.get("item_group")
+        brand = pricing_item.get("brand")
+        qty = flt(pricing_item.get("qty") or 0)
+        price_list_rate = flt(pricing_item.get("price_list_rate") or pricing_item.get("rate") or 0)
+
+        if qty <= 0:
+            continue
+
+        applicable_rules = []
+
+        for rule in selected_rules:
+            # Check if this rule applies to this item
+            if not _rule_applies_to_item(rule, item_code, item_group, brand):
+                continue
+            applicable_rules.append(rule)
+
+        if not applicable_rules:
+            continue
+
+        # Calculate discounts from applicable rules
+        discount_percentage = 0
+        per_unit_discount = 0
+        applied_rule_names = []
+        applied_schemes = set()
+
+        for rule in applicable_rules:
+            applied_rule_names.append(rule.name)
+            if rule.promotional_scheme:
+                applied_schemes.add(rule.promotional_scheme)
+
+            if rule.price_or_product_discount == "Price":
+                if rule.rate_or_discount == "Discount Percentage" and rule.discount_percentage:
+                    discount_percentage += flt(rule.discount_percentage)
+                elif rule.rate_or_discount == "Discount Amount" and rule.discount_amount:
+                    per_unit_discount += flt(rule.discount_amount)
+                elif rule.rate_or_discount == "Rate" and rule.rate:
+                    price_list_rate = flt(rule.rate)
+            elif rule.price_or_product_discount == "Product":
+                # Handle free item rules
+                if rule.free_item and rule.free_qty:
+                    free_item_doc = frappe._dict({
+                        "item_code": rule.free_item,
+                        "qty": flt(rule.free_qty),
+                        "rate": 0,
+                        "price_list_rate": 0,
+                        "is_free_item": 1,
+                        "pricing_rules": rule.name,
+                        "applied_promotional_scheme": rule.promotional_scheme,
+                    })
+                    free_items.append(free_item_doc)
+
+        # Calculate line discount amount
+        line_discount_amount = 0
+        if discount_percentage and qty and price_list_rate:
+            line_discount_amount = price_list_rate * qty * discount_percentage / 100
+        elif per_unit_discount and qty:
+            line_discount_amount = per_unit_discount * qty
+
+        # If we have a discount amount but no percentage, calculate the percentage
+        if not discount_percentage and line_discount_amount and qty and price_list_rate:
+            base_amount = price_list_rate * qty
+            if base_amount:
+                discount_percentage = (line_discount_amount / base_amount) * 100
+
+        # Update item with discounts
+        item_doc.discount_percentage = discount_percentage
+        item_doc.discount_amount = line_discount_amount
+        item_doc.price_list_rate = price_list_rate
+        item_doc.rate = flt(item_doc.get("rate") or price_list_rate)
+        item_doc.pricing_rules = applied_rule_names
+        item_doc.applied_promotional_schemes = list(applied_schemes)
+
+        applied_rules.update(applied_rule_names)
+
+    return {
+        "items": [dict(item) for item in prepared_items],
+        "free_items": [dict(item) for item in free_items],
+        "applied_pricing_rules": sorted(applied_rules),
+    }
+
+
+def _rule_applies_to_item(rule, item_code, item_group, brand):
+    """
+    Check if a pricing rule applies to a specific item based on apply_on criteria.
+    """
+    apply_on = rule.get("apply_on")
+
+    if apply_on == "Item Code":
+        # Check if item is in the rule's items list
+        rule_items = [row.item_code for row in rule.get("items") or []]
+        if rule_items and item_code not in rule_items:
+            return False
+
+    elif apply_on == "Item Group":
+        # Check if item's group matches
+        rule_groups = [row.item_group for row in rule.get("item_groups") or []]
+        if rule_groups:
+            # Check direct match or parent groups
+            if item_group not in rule_groups:
+                # Check parent item groups
+                try:
+                    item_group_doc = frappe.get_cached_doc("Item Group", item_group)
+                    parent_groups = []
+                    current = item_group_doc
+                    while current and current.parent_item_group:
+                        parent_groups.append(current.parent_item_group)
+                        if current.parent_item_group == current.name:
+                            break
+                        try:
+                            current = frappe.get_cached_doc("Item Group", current.parent_item_group)
+                        except frappe.DoesNotExistError:
+                            break
+
+                    if not any(pg in rule_groups for pg in parent_groups):
+                        return False
+                except frappe.DoesNotExistError:
+                    return False
+
+    elif apply_on == "Brand":
+        rule_brands = [row.brand for row in rule.get("brands") or []]
+        if rule_brands and brand not in rule_brands:
+            return False
+
+    # If apply_on is not set or is "Transaction", rule applies to all items
+    return True
+
+
 @frappe.whitelist()
 def apply_offers(invoice_data, selected_offers=None):
     """Calculate and apply promotional offers using ERPNext Pricing Rules.
@@ -1367,6 +1521,17 @@ def apply_offers(invoice_data, selected_offers=None):
             "items": pricing_items,
         })
 
+        # If specific offers are selected from the UI, apply them directly
+        # without relying on ERPNext's validation
+        if selected_offer_names:
+            return _apply_selected_offers_directly(
+                selected_offer_names,
+                prepared_items,
+                pricing_items,
+                index_map,
+                profile,
+            )
+
         # Call ERPNext pricing engine - it handles all conflicts based on priority
         pricing_results = erpnext_apply_pricing_rule(pricing_args, doc=mock_doc) or []
 
@@ -1407,14 +1572,6 @@ def apply_offers(invoice_data, selected_offers=None):
             for record in rule_records:
                 if record.promotional_scheme and not record.coupon_code_based:
                     rule_map[record.name] = record
-
-        if selected_offer_names:
-            # Restrict available rules to the ones explicitly selected from the UI.
-            rule_map = {
-                name: details
-                for name, details in rule_map.items()
-                if name in selected_offer_names
-            }
 
         if not rule_map:
             return {"items": items}
@@ -1460,43 +1617,10 @@ def apply_offers(invoice_data, selected_offers=None):
                 or 0
             )
 
-            # Calculate invoice subtotal for min_amt/max_amt validation
-            invoice_subtotal = sum(
-                flt(i.get("qty") or i.get("quantity") or 0) * flt(i.get("price_list_rate") or i.get("rate") or 0)
-                for i in prepared_items
-            )
-
-            # Filter rules based on min_amt, max_amt, min_qty, max_qty conditions
-            validated_rule_names = []
-            for rule_name in applicable_rule_names:
-                full_rule = frappe.get_cached_doc("Pricing Rule", rule_name)
-
-                # Check min_amt
-                if full_rule.min_amt and flt(full_rule.min_amt) > 0:
-                    if invoice_subtotal < flt(full_rule.min_amt):
-                        continue
-
-                # Check max_amt
-                if full_rule.max_amt and flt(full_rule.max_amt) > 0:
-                    if invoice_subtotal > flt(full_rule.max_amt):
-                        continue
-
-                # Check min_qty (per item)
-                if full_rule.min_qty and flt(full_rule.min_qty) > 0:
-                    if qty < flt(full_rule.min_qty):
-                        continue
-
-                # Check max_qty (per item)
-                if full_rule.max_qty and flt(full_rule.max_qty) > 0:
-                    if qty > flt(full_rule.max_qty):
-                        continue
-
-                validated_rule_names.append(rule_name)
-
-            applicable_rule_names = validated_rule_names
-
-            if not applicable_rule_names:
-                continue
+            # Note: ERPNext's apply_pricing_rule already validates min_amt, max_amt,
+            # min_qty, max_qty conditions at the item level. If a rule is returned
+            # in pricing_results, it has passed ERPNext's validation.
+            # We trust ERPNext's decision and don't add redundant validation.
 
             applied_rules.update(applicable_rule_names)
 
