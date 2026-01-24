@@ -1169,6 +1169,13 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 						setSearchResults(serverResults)
 						log.success(`Found ${serverResults.length} items on server`)
 
+						// Refresh stock for search results to ensure fresh quantities
+						// Server results have actual_qty, but stockStore.init might not update reactively
+						if (stockStore.warehouse.value) {
+							const itemCodes = serverResults.map(item => item.item_code)
+							stockStore.refresh(itemCodes, stockStore.warehouse.value).catch(() => {})
+						}
+
 						// Cache server results for future searches
 						await offlineWorker.cacheItems(serverResults)
 
@@ -1377,6 +1384,13 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 					log.info("No item group filters in POS Profile")
 				}
 
+				// Extract and set warehouse for stock store
+				const profileWarehouse = data?.pos_profile?.warehouse
+				if (profileWarehouse) {
+					stockStore.setWarehouse(profileWarehouse)
+					log.debug(`Set stock warehouse to: ${profileWarehouse}`)
+				}
+
 				// Set up real-time listener for POS Profile updates
 				posProfileUpdateCleanup = onPosProfileUpdate(async (updateData) => {
 					await handlePosProfileUpdateWithRecovery(updateData, profile)
@@ -1389,6 +1403,14 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 					log.debug("Auto-loading items with filters")
 					await loadAllItems(profile)
 					await loadItemGroups()
+
+					// Refresh stock from server to ensure fresh quantities
+					// This fixes the issue where cached items have stale stock values
+					if (profileWarehouse && allItems.value.length > 0) {
+						log.debug("Refreshing stock from server after items loaded")
+						const itemCodes = allItems.value.map(item => item.item_code)
+						await stockStore.refresh(itemCodes, profileWarehouse)
+					}
 				}
 			} catch (error) {
 				log.error("Error fetching POS Profile item groups", error)
