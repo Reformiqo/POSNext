@@ -38,6 +38,7 @@ export const useStockStore = defineStore('stock', () => {
 	const reserved = ref(new Map())  // item_code -> qty
 	const warehouse = ref(null)      // Current warehouse
 	const refreshing = ref(false)    // Loading state
+	const version = ref(0)           // Increments on every stock update for reactive tracking
 
 	// ========================================================================
 	// GETTERS - Functions that return reactive computed values
@@ -61,13 +62,17 @@ export const useStockStore = defineStore('stock', () => {
 	// ========================================================================
 
 	// Initialize items from server
-	const init = (items) => items?.forEach(item =>
-		server.value.set(item.item_code, {
-			qty: item.actual_qty ?? item.stock_qty ?? 0,
-			warehouse: item.warehouse || warehouse.value,
-			ts: Date.now()
-		})
-	)
+	const init = (items) => {
+		items?.forEach(item =>
+			server.value.set(item.item_code, {
+				qty: item.actual_qty ?? item.stock_qty ?? 0,
+				warehouse: item.warehouse || warehouse.value,
+				ts: Date.now()
+			})
+		)
+		// Increment version to trigger reactive updates in computed properties
+		if (items?.length > 0) version.value++
+	}
 
 	// Update reservations from cart
 	const reserve = (cartItems) => {
@@ -98,13 +103,17 @@ export const useStockStore = defineStore('stock', () => {
 	// Called by: POSSale.vue:770 (realtime), various refresh flows
 	// Does NOT clear reservations - only updates server stock
 	// Pinia reactivity automatically recalculates display stock
-	const update = (stockUpdates) => stockUpdates?.forEach(stockUpdate =>
-		server.value.set(stockUpdate.item_code, {
-			qty: stockUpdate.actual_qty ?? stockUpdate.stock_qty,
-			warehouse: stockUpdate.warehouse || warehouse.value,
-			ts: Date.now()
-		})
-	)
+	const update = (stockUpdates) => {
+		stockUpdates?.forEach(stockUpdate =>
+			server.value.set(stockUpdate.item_code, {
+				qty: stockUpdate.actual_qty ?? stockUpdate.stock_qty,
+				warehouse: stockUpdate.warehouse || warehouse.value,
+				ts: Date.now()
+			})
+		)
+		// Increment version to trigger reactive updates in computed properties
+		if (stockUpdates?.length > 0) version.value++
+	}
 
 	// Refresh stock from server (direct API call)
 	// Called after invoice submission, manual refresh, or warehouse change
@@ -174,6 +183,7 @@ export const useStockStore = defineStore('stock', () => {
 		reserved,
 		warehouse,
 		refreshing,
+		version,
 
 		// Getters
 		getDisplayStock,

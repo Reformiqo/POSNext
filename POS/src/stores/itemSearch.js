@@ -398,6 +398,12 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 	 * @returns {Array<Object>} Filtered items with injected stock quantities
 	 */
 	const filteredItems = computed(() => {
+		// IMPORTANT: Access stockStore.version to create reactive dependency
+		// Without this, the computed won't recalculate when stock updates via stockStore.init/refresh
+		// The version counter is incremented every time stock data is updated
+		// eslint-disable-next-line no-unused-vars
+		const _stockTrigger = stockStore.version
+
 		// Step 1: Determine source items (search results or all items)
 		const sourceItems = searchTerm.value?.trim()
 			? searchResults.value
@@ -406,9 +412,9 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 		if (!sourceItems?.length) return []
 
 		// Step 2: Create cache key based on current filter state
-		// Key format: "itemGroup_version_searchTerm"
-		// This ensures cache invalidates when data or filters change
-		const filterKey = `${selectedItemGroup.value || 'all'}_${allItemsVersion.value}_${searchTerm.value || ''}`
+		// Key format: "itemGroup_allVersion_searchVersion_searchTerm"
+		// This ensures cache invalidates when data, filters, or search stock changes
+		const filterKey = `${selectedItemGroup.value || 'all'}_${allItemsVersion.value}_${searchResultsVersion.value}_${searchTerm.value || ''}`
 
 		// Step 3: Check cache for filtered results
 		let list
@@ -1171,9 +1177,17 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 
 						// Refresh stock for search results to ensure fresh quantities
 						// Server results have actual_qty, but stockStore.init might not update reactively
-						if (stockStore.warehouse.value) {
+						// Get warehouse from store or from first item's warehouse field
+						const currentWarehouse = stockStore.warehouse?.value || stockStore.warehouse || serverResults[0]?.warehouse
+						if (currentWarehouse) {
 							const itemCodes = serverResults.map(item => item.item_code)
-							stockStore.refresh(itemCodes, stockStore.warehouse.value).catch(() => {})
+							log.debug(`Refreshing stock for ${itemCodes.length} search results, warehouse: ${currentWarehouse}`)
+							await stockStore.refresh(itemCodes, currentWarehouse)
+							// Force UI to update by invalidating filter cache and bumping version
+							clearBaseCache()
+							searchResultsVersion.value += 1
+						} else {
+							log.warn("No warehouse available for stock refresh")
 						}
 
 						// Cache server results for future searches
