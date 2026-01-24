@@ -477,7 +477,17 @@ def get_batch_serial_details(item_code, warehouse):
 									})
 
 				# Sort by expiry date (FEFO - First Expired First Out)
-				batches.sort(key=lambda x: (x["expiry_date"] or "9999-99-99", x["batch_no"]))
+				# Convert dates to strings for consistent comparison
+				def batch_sort_key(x):
+					exp = x["expiry_date"]
+					if exp is None:
+						exp_str = "9999-99-99"
+					elif hasattr(exp, 'strftime'):
+						exp_str = exp.strftime("%Y-%m-%d")
+					else:
+						exp_str = str(exp)
+					return (exp_str, x["batch_no"])
+				batches.sort(key=batch_sort_key)
 			result["batches"] = batches
 
 		if has_serial_no:
