@@ -1356,8 +1356,19 @@ def apply_offers(invoice_data, selected_offers=None):
             }
         )
 
+        # Create a mock document object for ERPNext's pricing rule engine
+        # This is needed for "Product Discount" type rules (Buy X Get Y Free)
+        # which iterate over doc.items
+        mock_doc = frappe._dict({
+            "doctype": invoice.get("doctype") or "Sales Invoice",
+            "name": invoice.get("name") or "POS-INVOICE",
+            "company": profile.company,
+            "customer": customer,
+            "items": pricing_items,
+        })
+
         # Call ERPNext pricing engine - it handles all conflicts based on priority
-        pricing_results = erpnext_apply_pricing_rule(pricing_args) or []
+        pricing_results = erpnext_apply_pricing_rule(pricing_args, doc=mock_doc) or []
 
         if not pricing_results:
             return {"items": items}
@@ -1440,8 +1451,6 @@ def apply_offers(invoice_data, selected_offers=None):
             if not applicable_rule_names:
                 continue
 
-            applied_rules.update(applicable_rule_names)
-
             item_doc = prepared_items[item_index]
             qty = flt(item_doc.get("qty") or item_doc.get("quantity") or 0)
             price_list_rate = flt(
@@ -1451,38 +1460,72 @@ def apply_offers(invoice_data, selected_offers=None):
                 or 0
             )
 
-            # Get discount from result or fetch from pricing rule
-            discount_percentage = flt(result.get("discount_percentage") or 0)
-            per_unit_discount = flt(result.get("discount_amount") or 0)
+            # Calculate invoice subtotal for min_amt/max_amt validation
+            invoice_subtotal = sum(
+                flt(i.get("qty") or i.get("quantity") or 0) * flt(i.get("price_list_rate") or i.get("rate") or 0)
+                for i in prepared_items
+            )
 
-            # If ERPNext didn't calculate discount (validate_applied_rule=1),
-            # we need to fetch and apply it manually
-            if (
-                not discount_percentage
-                and not per_unit_discount
-                and applicable_rule_names
-            ):
-                for rule_name in applicable_rule_names:
-                    rule_doc = rule_map.get(rule_name)
-                    if not rule_doc:
+            # Filter rules based on min_amt, max_amt, min_qty, max_qty conditions
+            validated_rule_names = []
+            for rule_name in applicable_rule_names:
+                full_rule = frappe.get_cached_doc("Pricing Rule", rule_name)
+
+                # Check min_amt
+                if full_rule.min_amt and flt(full_rule.min_amt) > 0:
+                    if invoice_subtotal < flt(full_rule.min_amt):
                         continue
 
-                    # Fetch full pricing rule to get discount values
-                    full_rule = frappe.get_cached_doc("Pricing Rule", rule_name)
+                # Check max_amt
+                if full_rule.max_amt and flt(full_rule.max_amt) > 0:
+                    if invoice_subtotal > flt(full_rule.max_amt):
+                        continue
 
-                    if (
-                        full_rule.rate_or_discount == "Discount Percentage"
-                        and full_rule.discount_percentage
-                    ):
-                        discount_percentage += flt(full_rule.discount_percentage)
-                    elif (
-                        full_rule.rate_or_discount == "Discount Amount"
-                        and full_rule.discount_amount
-                    ):
-                        per_unit_discount += flt(full_rule.discount_amount)
-                    elif full_rule.rate_or_discount == "Rate" and full_rule.rate:
-                        # Apply fixed rate
-                        price_list_rate = flt(full_rule.rate)
+                # Check min_qty (per item)
+                if full_rule.min_qty and flt(full_rule.min_qty) > 0:
+                    if qty < flt(full_rule.min_qty):
+                        continue
+
+                # Check max_qty (per item)
+                if full_rule.max_qty and flt(full_rule.max_qty) > 0:
+                    if qty > flt(full_rule.max_qty):
+                        continue
+
+                validated_rule_names.append(rule_name)
+
+            applicable_rule_names = validated_rule_names
+
+            if not applicable_rule_names:
+                continue
+
+            applied_rules.update(applicable_rule_names)
+
+            # Always calculate discounts from validated rules only
+            # (Don't use ERPNext's values as they might include rules that didn't pass validation)
+            discount_percentage = 0
+            per_unit_discount = 0
+
+            for rule_name in applicable_rule_names:
+                rule_doc = rule_map.get(rule_name)
+                if not rule_doc:
+                    continue
+
+                # Fetch full pricing rule to get discount values
+                full_rule = frappe.get_cached_doc("Pricing Rule", rule_name)
+
+                if (
+                    full_rule.rate_or_discount == "Discount Percentage"
+                    and full_rule.discount_percentage
+                ):
+                    discount_percentage += flt(full_rule.discount_percentage)
+                elif (
+                    full_rule.rate_or_discount == "Discount Amount"
+                    and full_rule.discount_amount
+                ):
+                    per_unit_discount += flt(full_rule.discount_amount)
+                elif full_rule.rate_or_discount == "Rate" and full_rule.rate:
+                    # Apply fixed rate
+                    price_list_rate = flt(full_rule.rate)
 
             line_discount_amount = 0
             if discount_percentage and qty and price_list_rate:
