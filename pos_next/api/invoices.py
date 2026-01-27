@@ -390,8 +390,19 @@ def update_invoice(data):
             except Exception as e:
                 frappe.log_error(f"Failed to create customer {customer_name}: {e}")
 
-        # Disable automatic pricing rules (we handle discounts manually from POS)
+        # ========================================================================
+        # DISABLE AUTOMATIC PRICING RULES
+        # ========================================================================
+        # CRITICAL: POS handles discounts manually - prevent ERPNext from auto-applying
+        # pricing rules which would override the user's manual discounts.
+        # We set multiple flags to ensure pricing rules are completely disabled:
+        # 1. ignore_pricing_rule on document - tells ERPNext to skip pricing rule logic
+        # 2. apply_pricing_rule = 0 - another flag ERPNext checks
+        # 3. flags.ignore_pricing_rule - internal flag for hooks/events
+        # 4. Clear pricing_rules on each item - remove any pre-applied rules
+        # ========================================================================
         invoice_doc.ignore_pricing_rule = 1
+        invoice_doc.apply_pricing_rule = 0
         invoice_doc.flags.ignore_pricing_rule = True
 
         # ========================================================================
@@ -404,6 +415,11 @@ def update_invoice(data):
         # Reverse: price_list_rate = rate / (1 - discount_percentage/100)
         # ========================================================================
         for item in invoice_doc.get("items", []):
+            # Clear any pricing rules that ERPNext might have auto-applied
+            item.pricing_rules = None
+            item.pricing_rule_for = None
+            item.margin_type = None
+            item.margin_rate_or_amount = 0
             item_rate = flt(item.rate or 0)
             discount_pct = flt(item.discount_percentage or 0)
 
@@ -586,6 +602,18 @@ def submit_invoice(invoice=None, data=None):
 
         # Ensure update_stock is set
         invoice_doc.update_stock = 1
+
+        # ========================================================================
+        # DISABLE AUTOMATIC PRICING RULES (also in submit to prevent re-application)
+        # ========================================================================
+        invoice_doc.ignore_pricing_rule = 1
+        invoice_doc.apply_pricing_rule = 0
+        invoice_doc.flags.ignore_pricing_rule = True
+
+        # Clear pricing rules from items to prevent ERPNext from using cached rules
+        for item in invoice_doc.get("items", []):
+            item.pricing_rules = None
+            item.pricing_rule_for = None
 
         # Copy accounting dimensions from POS Profile if not already set
         if pos_profile and not invoice_doc.get("branch"):
