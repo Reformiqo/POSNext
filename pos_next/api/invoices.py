@@ -395,53 +395,32 @@ def update_invoice(data):
         # ========================================================================
         # CRITICAL: POS handles discounts manually - prevent ERPNext from auto-applying
         # pricing rules which would override the user's manual discounts.
-        # We set multiple flags to ensure pricing rules are completely disabled:
-        # 1. ignore_pricing_rule on document - tells ERPNext to skip pricing rule logic
-        # 2. apply_pricing_rule = 0 - another flag ERPNext checks
-        # 3. flags.ignore_pricing_rule - internal flag for hooks/events
-        # 4. Clear pricing_rules on each item - remove any pre-applied rules
         # ========================================================================
         invoice_doc.ignore_pricing_rule = 1
         invoice_doc.apply_pricing_rule = 0
         invoice_doc.flags.ignore_pricing_rule = True
 
         # ========================================================================
-        # DISCOUNT CALCULATION - CRITICAL LOGIC
+        # PRESERVE FRONTEND DISCOUNT VALUES
         # ========================================================================
-        # Problem: Frontend sends rate (discounted) and discount_percentage
-        # Solution: Reverse-calculate price_list_rate (original price) to avoid double discount
-        #
-        # Formula: rate = price_list_rate * (1 - discount_percentage/100)
-        # Reverse: price_list_rate = rate / (1 - discount_percentage/100)
+        # CRITICAL: Save the discount values from frontend BEFORE any ERPNext
+        # processing. ERPNext's set_missing_values() and calculate_taxes_and_totals()
+        # can overwrite these with automatic pricing rules. We'll restore them after.
         # ========================================================================
+        frontend_discounts = {}
         for item in invoice_doc.get("items", []):
-            # Clear any pricing rules that ERPNext might have auto-applied
+            item_code = item.item_code
+            frontend_discounts[item_code] = {
+                "rate": flt(item.rate or 0),
+                "price_list_rate": flt(item.price_list_rate or item.rate or 0),
+                "discount_percentage": flt(item.discount_percentage or 0),
+                "discount_amount": flt(item.discount_amount or 0),
+            }
+            # Clear any pricing rules that might have been cached
             item.pricing_rules = None
             item.pricing_rule_for = None
             item.margin_type = None
             item.margin_rate_or_amount = 0
-            item_rate = flt(item.rate or 0)
-            discount_pct = flt(item.discount_percentage or 0)
-
-            # If item has a discount, reverse-calculate the original price_list_rate
-            if discount_pct > 0 and discount_pct < 100:
-                if item_rate > 0:
-                    # Reverse calculation to get original price
-                    item.price_list_rate = item_rate / (1 - discount_pct / 100)
-                elif not item.get("price_list_rate"):
-                    # Fallback: if rate is 0 but discount exists (edge case)
-                    item.price_list_rate = item_rate
-            elif not item.get("price_list_rate"):
-                # No discount or price_list_rate not set - use rate as is
-                item.price_list_rate = item_rate
-
-            # Ensure price_list_rate is never less than rate (data integrity)
-            if flt(item.price_list_rate) < item_rate:
-                item.price_list_rate = item_rate
-
-            # IMPORTANT: Keep the rate from frontend (do NOT set to 0)
-            # ERPNext will recalculate if needed, but preserving frontend rate
-            # prevents rounding issues and ensures UI matches invoice
 
         # Set invoice flags BEFORE calculations
         invoice_doc.is_pos = 1
@@ -494,6 +473,57 @@ def update_invoice(data):
 
         # Calculate totals and apply discounts (with rounding disabled)
         invoice_doc.calculate_taxes_and_totals()
+
+        # ========================================================================
+        # RESTORE FRONTEND DISCOUNT VALUES
+        # ========================================================================
+        # CRITICAL: After ERPNext's calculate_taxes_and_totals(), restore the
+        # frontend's discount values. ERPNext may have overwritten them with
+        # automatic pricing rules (like the 25% promotional scheme).
+        # ========================================================================
+        discount_changed = False
+        for item in invoice_doc.get("items", []):
+            item_code = item.item_code
+            if item_code in frontend_discounts:
+                fd = frontend_discounts[item_code]
+
+                # Only restore if frontend had a discount that differs from what ERPNext set
+                frontend_disc_pct = fd["discount_percentage"]
+                current_disc_pct = flt(item.discount_percentage or 0)
+
+                if frontend_disc_pct > 0 and abs(frontend_disc_pct - current_disc_pct) > 0.01:
+                    # Frontend discount differs from ERPNext's - restore frontend values
+                    discount_changed = True
+
+                    # Restore price_list_rate (original price before discount)
+                    item.price_list_rate = fd["price_list_rate"]
+
+                    # Restore discount percentage from frontend
+                    item.discount_percentage = frontend_disc_pct
+
+                    # Calculate the correct rate based on frontend discount
+                    if frontend_disc_pct > 0:
+                        item.rate = fd["price_list_rate"] * (1 - frontend_disc_pct / 100)
+                    else:
+                        item.rate = fd["rate"]
+
+                    # Calculate amount
+                    item.amount = flt(item.rate * item.qty)
+
+                    # Clear any margin/pricing rule fields that ERPNext might have set
+                    item.pricing_rules = None
+                    item.pricing_rule_for = None
+                    item.margin_type = None
+                    item.margin_rate_or_amount = 0
+                    item.rate_with_margin = 0
+
+        # If we changed any discounts, recalculate totals with the corrected values
+        if discount_changed:
+            # Set flags again to prevent pricing rules from being re-applied
+            invoice_doc.ignore_pricing_rule = 1
+            invoice_doc.apply_pricing_rule = 0
+            invoice_doc.flags.ignore_pricing_rule = True
+            invoice_doc.calculate_taxes_and_totals()
 
         # Set accounts for payment methods before saving
         for payment in invoice_doc.payments:
