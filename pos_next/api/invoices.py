@@ -480,6 +480,8 @@ def update_invoice(data):
         # CRITICAL: After ERPNext's calculate_taxes_and_totals(), restore the
         # frontend's discount values. ERPNext may have overwritten them with
         # automatic pricing rules (like the 25% promotional scheme).
+        # We ALWAYS use the frontend values, even if discount is 0 - this ensures
+        # ERPNext's auto-applied discounts are cleared when user didn't apply any.
         # ========================================================================
         discount_changed = False
         for item in invoice_doc.get("items", []):
@@ -487,35 +489,40 @@ def update_invoice(data):
             if item_code in frontend_discounts:
                 fd = frontend_discounts[item_code]
 
-                # Only restore if frontend had a discount that differs from what ERPNext set
+                # Get frontend and current discount values
                 frontend_disc_pct = fd["discount_percentage"]
                 current_disc_pct = flt(item.discount_percentage or 0)
 
-                if frontend_disc_pct > 0 and abs(frontend_disc_pct - current_disc_pct) > 0.01:
-                    # Frontend discount differs from ERPNext's - restore frontend values
+                # ALWAYS restore frontend values if they differ from ERPNext's
+                # This handles BOTH cases:
+                # 1. User applied 33% but ERPNext set 25% -> restore 33%
+                # 2. User applied NO discount but ERPNext set 25% -> restore 0%
+                if abs(frontend_disc_pct - current_disc_pct) > 0.01:
                     discount_changed = True
 
                     # Restore price_list_rate (original price before discount)
                     item.price_list_rate = fd["price_list_rate"]
 
-                    # Restore discount percentage from frontend
+                    # Restore discount percentage from frontend (can be 0)
                     item.discount_percentage = frontend_disc_pct
 
                     # Calculate the correct rate based on frontend discount
                     if frontend_disc_pct > 0:
                         item.rate = fd["price_list_rate"] * (1 - frontend_disc_pct / 100)
                     else:
-                        item.rate = fd["rate"]
+                        # No discount - use original rate from frontend
+                        item.rate = fd["rate"] if fd["rate"] > 0 else fd["price_list_rate"]
 
                     # Calculate amount
                     item.amount = flt(item.rate * item.qty)
 
-                    # Clear any margin/pricing rule fields that ERPNext might have set
+                    # Clear any margin/pricing rule fields that ERPNext set
                     item.pricing_rules = None
                     item.pricing_rule_for = None
                     item.margin_type = None
                     item.margin_rate_or_amount = 0
                     item.rate_with_margin = 0
+                    item.discount_amount = 0 if frontend_disc_pct == 0 else flt(fd["price_list_rate"] * item.qty * frontend_disc_pct / 100)
 
         # If we changed any discounts, recalculate totals with the corrected values
         if discount_changed:
