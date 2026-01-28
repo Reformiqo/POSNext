@@ -711,28 +711,37 @@ export function useInvoice() {
 				pos_profile: posProfile.value,
 				posa_pos_opening_shift: posOpeningShift.value,
 				customer: customer.value?.name || customer.value,
-				items: rawItems.map((item) => ({
-					item_code: item.item_code,
-					item_name: item.item_name,
-					qty: item.quantity,
-					// IMPORTANT: Rate calculation depends on tax mode and discounts
-					// Tax-inclusive mode: Send gross amount (price after discount, before tax extraction)
-					//   - With discount: price_list_rate - discount_amount
-					//   - Without discount: price_list_rate
-					//   ERPNext will extract net amount based on included_in_print_rate flag
-					// Tax-exclusive mode: Send net amount (after discount, before tax addition)
-					rate: taxInclusive.value
-						? ((item.price_list_rate || item.rate) - (item.discount_amount || 0) / (item.quantity || 1))
-						: (item.quantity > 0 ? item.amount / item.quantity : item.rate),
-					price_list_rate: item.price_list_rate || item.rate,
-					uom: item.uom,
-					warehouse: item.warehouse,
-					batch_no: item.batch_no,
-					serial_no: item.serial_no,
-					conversion_factor: item.conversion_factor || 1,
-					discount_percentage: item.discount_percentage || 0,
-					discount_amount: item.discount_amount || 0,
-				})),
+				items: rawItems.map((item) => {
+					// Helper to round to 2 decimal places (currency precision)
+					const round2 = (val) => Math.round((val || 0) * 100) / 100
+
+					// Calculate rate with proper rounding to avoid floating point issues
+					let itemRate
+					if (taxInclusive.value) {
+						// Tax-inclusive: price after discount
+						itemRate = round2((item.price_list_rate || item.rate) - (item.discount_amount || 0) / (item.quantity || 1))
+					} else {
+						// Tax-exclusive: net rate after discount
+						itemRate = item.quantity > 0
+							? round2(item.amount / item.quantity)
+							: round2(item.rate)
+					}
+
+					return {
+						item_code: item.item_code,
+						item_name: item.item_name,
+						qty: item.quantity,
+						rate: itemRate,
+						price_list_rate: round2(item.price_list_rate || item.rate),
+						uom: item.uom,
+						warehouse: item.warehouse,
+						batch_no: item.batch_no,
+						serial_no: item.serial_no,
+						conversion_factor: item.conversion_factor || 1,
+						discount_percentage: round2(item.discount_percentage || 0),
+						discount_amount: round2(item.discount_amount || 0),
+					}
+				}),
 				payments: rawPayments.map((p) => ({
 					mode_of_payment: p.mode_of_payment,
 					amount: p.amount,

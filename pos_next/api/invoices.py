@@ -631,6 +631,27 @@ def submit_invoice(invoice=None, data=None):
 
         invoice_name = invoice.get("name")
 
+        # ========================================================================
+        # DUPLICATE PREVENTION
+        # ========================================================================
+        # Check if this invoice was already submitted (prevents double-click issues)
+        if invoice_name and frappe.db.exists(doctype, invoice_name):
+            existing_docstatus = frappe.db.get_value(doctype, invoice_name, "docstatus")
+            if existing_docstatus == 1:
+                # Already submitted - return the existing invoice instead of creating a duplicate
+                existing_doc = frappe.get_doc(doctype, invoice_name)
+                return {
+                    "name": existing_doc.name,
+                    "status": existing_doc.docstatus,
+                    "grand_total": existing_doc.grand_total,
+                    "total": existing_doc.total,
+                    "net_total": existing_doc.net_total,
+                    "outstanding_amount": existing_doc.outstanding_amount,
+                    "paid_amount": existing_doc.paid_amount,
+                    "change_amount": getattr(existing_doc, "change_amount", 0),
+                    "already_submitted": True,  # Flag to indicate this was a duplicate request
+                }
+
         # Get or create invoice
         if not invoice_name or not frappe.db.exists(doctype, invoice_name):
             created = update_invoice(json.dumps(invoice))
@@ -720,6 +741,29 @@ def submit_invoice(invoice=None, data=None):
         # Validate stock availability only if negative stock is not allowed
         if not pos_settings_allow_negative:
             _validate_stock_on_invoice(invoice_doc)
+
+        # ========================================================================
+        # FIX PARTLY PAID ISSUE - Ensure paid_amount matches grand_total
+        # ========================================================================
+        # After all calculations, check if total payments equal or exceed grand_total.
+        # Due to floating point rounding, there may be tiny differences (e.g., 0.01).
+        # If the difference is within tolerance, set paid_amount = grand_total
+        # to prevent "Partly Paid" status.
+        # ========================================================================
+        total_payment = flt(sum(p.amount for p in invoice_doc.payments), 2)
+        grand_total = flt(invoice_doc.grand_total, 2)
+
+        # If payment covers grand_total (within 1 rupee tolerance for rounding)
+        if total_payment > 0 and grand_total > 0:
+            difference = abs(total_payment - grand_total)
+            if difference <= 1.0:  # Within 1 rupee tolerance
+                # Payments cover the invoice - ensure no outstanding
+                invoice_doc.paid_amount = grand_total
+                invoice_doc.base_paid_amount = flt(grand_total * (invoice_doc.conversion_rate or 1), 2)
+            elif total_payment > grand_total:
+                # Overpayment (change due) - set paid to total payment
+                invoice_doc.paid_amount = total_payment
+                invoice_doc.base_paid_amount = flt(total_payment * (invoice_doc.conversion_rate or 1), 2)
 
         # Save before submit
         invoice_doc.flags.ignore_permissions = True
