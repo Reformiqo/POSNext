@@ -543,21 +543,42 @@ export function useInvoice() {
 	 * @param {Object} item - Invoice item object with quantity, rates, and discount fields
 	 */
 	function recalculateItem(item) {
-		// Determine the base unit price (original list price)
-		const priceListRate = item.price_list_rate || item.rate
-		const baseAmount = item.quantity * priceListRate
+		// Helper to round to 2 decimal places (currency precision)
+		const round2 = (val) => Math.round((val || 0) * 100) / 100
 
-		// Calculate discount from either percentage or fixed amount
-		let discountAmount = 0
+		// Determine the base unit price (original list price)
+		const priceListRate = round2(item.price_list_rate || item.rate)
+		const quantity = item.quantity || 0
+
+		// ========================================================================
+		// CRITICAL: Calculate discount PER UNIT first, then multiply by quantity
+		// This matches ERPNext's calculation method to avoid rounding differences
+		// ERPNext: discount_per_unit = price × discount% → round → rate = price - discount
+		//          amount = rate × quantity
+		// ========================================================================
+		let discountPerUnit = 0
+		let rateAfterDiscount = priceListRate
+
 		if (item.discount_percentage > 0) {
-			discountAmount = (baseAmount * item.discount_percentage) / 100
+			// Calculate discount per unit and round
+			discountPerUnit = round2(priceListRate * item.discount_percentage / 100)
+			rateAfterDiscount = round2(priceListRate - discountPerUnit)
 		} else if (item.discount_amount > 0) {
-			discountAmount = item.discount_amount
-			// Sync percentage when amount is provided directly
-			item.discount_percentage =
-				baseAmount > 0 ? (discountAmount / baseAmount) * 100 : 0
+			// If discount amount is provided, it's per unit in ERPNext
+			discountPerUnit = round2(item.discount_amount / quantity) // Convert total to per unit
+			rateAfterDiscount = round2(priceListRate - discountPerUnit)
+			// Sync percentage
+			item.discount_percentage = priceListRate > 0
+				? round2((discountPerUnit / priceListRate) * 100)
+				: 0
 		}
-		item.discount_amount = discountAmount
+
+		// Total discount amount = per unit discount × quantity
+		item.discount_amount = round2(discountPerUnit * quantity)
+
+		// Calculate amount (quantity × rounded rate)
+		const baseAmount = round2(quantity * priceListRate)
+		const netAmountBeforeTax = round2(quantity * rateAfterDiscount)
 
 		// Calculate tax based on inclusive/exclusive mode
 		const totalTaxRate = calculateTotalTaxRate()
@@ -566,13 +587,12 @@ export function useInvoice() {
 
 		if (taxInclusive.value && totalTaxRate > 0) {
 			// Tax-inclusive: Work backwards from gross to extract net and tax
-			const grossAmount = baseAmount - discountAmount
-			netAmount = grossAmount / (1 + totalTaxRate / 100)
-			taxAmount = grossAmount - netAmount
+			netAmount = round2(netAmountBeforeTax / (1 + totalTaxRate / 100))
+			taxAmount = round2(netAmountBeforeTax - netAmount)
 		} else {
 			// Tax-exclusive: Calculate tax on top of net amount
-			netAmount = baseAmount - discountAmount
-			taxAmount = (netAmount * totalTaxRate) / 100
+			netAmount = netAmountBeforeTax
+			taxAmount = round2(netAmount * totalTaxRate / 100)
 		}
 
 		// Update item fields

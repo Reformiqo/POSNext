@@ -493,25 +493,33 @@ function handleDiscountTypeChange() {
 }
 
 function calculateDiscount() {
+	// Helper to round to 2 decimal places
+	const round2 = (val) => Math.round((val || 0) * 100) / 100
+
 	if (discountType.value === "percentage") {
 		// Ensure percentage doesn't exceed 100
 		if (discountValue.value > 100) {
 			discountValue.value = 100
 		}
-		calculatedDiscount.value =
-			(calculatedSubtotal.value * discountValue.value) / 100
+		// CRITICAL: Calculate discount PER UNIT first, then multiply by quantity
+		// This matches ERPNext's calculation to avoid rounding differences
+		const discountPerUnit = round2(localRate.value * discountValue.value / 100)
+		const rateAfterDiscount = round2(localRate.value - discountPerUnit)
+		calculatedDiscount.value = round2(discountPerUnit * localQuantity.value)
+		calculatedTotal.value = round2(rateAfterDiscount * localQuantity.value)
 	} else {
 		// Ensure amount doesn't exceed subtotal
 		if (discountValue.value > calculatedSubtotal.value) {
 			discountValue.value = calculatedSubtotal.value
 		}
-		calculatedDiscount.value = discountValue.value
+		calculatedDiscount.value = round2(discountValue.value)
+		calculatedTotal.value = round2(calculatedSubtotal.value - calculatedDiscount.value)
 	}
-	calculatedTotal.value = calculatedSubtotal.value - calculatedDiscount.value
 }
 
 function calculateTotals() {
-	calculatedSubtotal.value = localRate.value * localQuantity.value
+	// Round subtotal to 2 decimal places
+	calculatedSubtotal.value = Math.round((localRate.value * localQuantity.value) * 100) / 100
 	calculateDiscount()
 }
 
