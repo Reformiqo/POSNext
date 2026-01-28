@@ -501,20 +501,23 @@ def update_invoice(data):
                     discount_changed = True
 
                     # Restore price_list_rate (original price before discount)
-                    item.price_list_rate = fd["price_list_rate"]
+                    price_list_rate = flt(fd["price_list_rate"], 2)
+                    item.price_list_rate = price_list_rate
 
                     # Restore discount percentage from frontend (can be 0)
                     item.discount_percentage = frontend_disc_pct
 
                     # Calculate the correct rate based on frontend discount
+                    # Use proper rounding to 2 decimal places to avoid precision issues
                     if frontend_disc_pct > 0:
-                        item.rate = fd["price_list_rate"] * (1 - frontend_disc_pct / 100)
+                        # Round rate to 2 decimal places to match UI display
+                        item.rate = flt(price_list_rate * (1 - frontend_disc_pct / 100), 2)
                     else:
                         # No discount - use original rate from frontend
-                        item.rate = fd["rate"] if fd["rate"] > 0 else fd["price_list_rate"]
+                        item.rate = flt(fd["rate"], 2) if fd["rate"] > 0 else price_list_rate
 
-                    # Calculate amount
-                    item.amount = flt(item.rate * item.qty)
+                    # Calculate amount with proper rounding
+                    item.amount = flt(item.rate * item.qty, 2)
 
                     # Clear any margin/pricing rule fields that ERPNext set
                     item.pricing_rules = None
@@ -522,7 +525,7 @@ def update_invoice(data):
                     item.margin_type = None
                     item.margin_rate_or_amount = 0
                     item.rate_with_margin = 0
-                    item.discount_amount = 0 if frontend_disc_pct == 0 else flt(fd["price_list_rate"] * item.qty * frontend_disc_pct / 100)
+                    item.discount_amount = flt(price_list_rate * item.qty * frontend_disc_pct / 100, 2) if frontend_disc_pct > 0 else 0
 
         # If we changed any discounts, recalculate totals with the corrected values
         if discount_changed:

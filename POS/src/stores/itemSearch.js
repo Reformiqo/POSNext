@@ -398,23 +398,19 @@ export const useItemSearchStore = defineStore("itemSearch", () => {
 	 * @returns {Array<Object>} Filtered items with injected stock quantities
 	 */
 	const filteredItems = computed(() => {
-		// IMPORTANT: Access stockStore.version to create reactive dependency
-		// Without this, the computed won't recalculate when stock updates via stockStore.init/refresh
-		// The version counter is incremented every time stock data is updated
-		// eslint-disable-next-line no-unused-vars
-		const _stockTrigger = stockStore.version
-
 		// Step 1: Determine source items (search results or all items)
-		const sourceItems = searchTerm.value?.trim()
-			? searchResults.value
-			: allItems.value
+		// Access allItems.value directly to ensure Vue tracks it as a dependency
+		const hasSearchTerm = searchTerm.value?.trim()
+		const sourceItems = hasSearchTerm ? searchResults.value : allItems.value
 
-		if (!sourceItems?.length) return []
+		// Early return if no items - this ensures the computed re-evaluates when items are added
+		if (!sourceItems || sourceItems.length === 0) return []
 
 		// Step 2: Create cache key based on current filter state
-		// Key format: "itemGroup_allVersion_searchVersion_searchTerm"
-		// This ensures cache invalidates when data, filters, or search stock changes
-		const filterKey = `${selectedItemGroup.value || 'all'}_${allItemsVersion.value}_${searchResultsVersion.value}_${searchTerm.value || ''}`
+		// Include stockStore.version to ensure cache invalidates when stock changes
+		// Key format: "itemGroup_allVersion_searchVersion_stockVersion_searchTerm"
+		const stockVersion = stockStore.version || 0
+		const filterKey = `${selectedItemGroup.value || 'all'}_${allItemsVersion.value}_${searchResultsVersion.value}_${stockVersion}_${searchTerm.value || ''}`
 
 		// Step 3: Check cache for filtered results
 		let list
