@@ -71,7 +71,7 @@
   "dt": "Item",
   "fetch_from": null,
   "fetch_if_empty": 0,
-  "fieldname": "company",
+  "fieldname": "custom_company",
   "fieldtype": "Link",
   "hidden": 0,
   "hide_border": 0,
