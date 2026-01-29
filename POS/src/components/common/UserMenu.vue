@@ -172,11 +172,11 @@ const isOpen = ref(false)
 const showLanguageDropdown = ref(false)
 
 const userInitials = computed(() => {
-	const parts = props.userName.split(" ")
-	if (parts.length >= 2) {
+	const parts = props.userName.split(" ").filter(part => part.length > 0)
+	if (parts.length >= 2 && parts[0][0] && parts[1][0]) {
 		return (parts[0][0] + parts[1][0]).toUpperCase()
 	}
-	return props.userName.substring(0, 2).toUpperCase()
+	return props.userName.trim().substring(0, 2).toUpperCase() || "?"
 })
 
 // Watch isOpen and emit events

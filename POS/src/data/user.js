@@ -37,7 +37,10 @@ export const userData = reactive({
 
 	getInitials() {
 		const parts = this.getDisplayName().split(" ").filter(Boolean)
-		return parts.length >= 2 ? (parts[0][0] + parts[1][0]).toUpperCase() : this.getDisplayName().substring(0, 2).toUpperCase()
+		if (parts.length >= 2 && parts[0][0] && parts[1][0]) {
+			return (parts[0][0] + parts[1][0]).toUpperCase()
+		}
+		return this.getDisplayName().trim().substring(0, 2).toUpperCase() || "?"
 	},
 })
 

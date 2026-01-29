@@ -1143,11 +1143,11 @@ function createNewCustomer() {
  */
 function getInitials(name) {
 	if (!name) return "?"
-	const parts = name.split(" ")
-	if (parts.length >= 2) {
+	const parts = name.split(" ").filter(part => part.length > 0)
+	if (parts.length >= 2 && parts[0][0] && parts[1][0]) {
 		return (parts[0][0] + parts[1][0]).toUpperCase()
 	}
-	return name.substring(0, 2).toUpperCase()
+	return name.trim().substring(0, 2).toUpperCase() || "?"
 }
 
 /**
